@@ -1,0 +1,27 @@
+; PSP Texthook settings.
+; Copy to ms0:/SEPLUGINS/texthook/config.ini. Every key is optional; the values
+; below are the defaults. Lines starting with ; or # are comments.
+
+; Which network profiles to use, in order, separated by commas. Each one is
+; the profile's name as shown in the XMB, its SSID, or its number (1, 2, ...).
+; Names and SSIDs ignore upper/lower case and may be Japanese (save this file
+; as UTF-8). Only the listed profiles are tried, e.g.
+;   profile = My hotspot
+;   profile = My hotspot, Home
+; 0 = start with the most recently used profile, then try all the others.
+; If nothing listed matches, it falls back to 0 (the log says why).
+profile = 0
+
+; HTTP port. With 80 the URL needs no :port.
+port = 80
+
+; On-screen messages: the URL and a QR code for 10 s after every connect,
+; Wi-Fi problems, and hooks that were refused. 0 turns them off.
+overlay = 1
+
+; Where the messages appear: top-left, top-right, bottom-left, bottom-right.
+overlay_corner = top-left
+
+; The page is also at http://<hostname>.local/ (mDNS), e.g. http://psp.local/.
+; Letters, digits and '-' only. Needs a device that resolves .local names.
+hostname = psp

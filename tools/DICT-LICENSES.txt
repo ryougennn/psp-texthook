@@ -1,0 +1,65 @@
+Popup dictionaries: sources and licences
+=======================================
+
+The .bin files in this folder are built from the dictionaries below by
+texthook's tools/gen_dict.py and tools/yomitan2dict.py. Each .bin is a
+derived work of its sources and is distributed under their licences, not
+under texthook's GPL.
+
+
+1-jmdict.bin: JMdict and KANJIDIC2
+----------------------------------
+
+This dictionary uses the JMdict/EDICT and KANJIDIC dictionary files. These
+files are the property of the Electronic Dictionary Research and Development
+Group, and are used in conformance with the Group's licence.
+
+    Copyright (C) James William Breen and the Electronic Dictionary Research
+    and Development Group.
+    Licence: Creative Commons Attribution-ShareAlike 4.0 International
+             (CC BY-SA 4.0), https://creativecommons.org/licenses/by-sa/4.0/
+    Terms:   https://www.edrdg.org/edrdg/licence.html
+    JMdict:  https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project
+    KANJIDIC: https://www.edrdg.org/wiki/index.php/KANJIDIC_Project
+    Source:  http://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz
+             http://ftp.edrdg.org/pub/Nihongo/kanjidic2.xml.gz
+
+1-jmdict.bin is distributed under the same licence (CC BY-SA 4.0). Some
+KANJIDIC2 fields are under their contributors' own copyright; the popup uses
+only the kanji meanings.
+
+
+2-vndb-names.bin: VNDB Names for Yomitan
+----------------------------------------
+
+Converted from "VNDB Names" by kaanium,
+https://github.com/kaanium/VNDB-Names-for-Yomitan, under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2024 kaanium
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+The names themselves come from the Visual Novel Database (https://vndb.org/),
+whose data is made available under the Open Database License (ODbL 1.0,
+https://opendatacommons.org/licenses/odbl/1-0/), with individual contents under
+the Database Contents License (https://opendatacommons.org/licenses/dbcl/1-0/).
+See https://vndb.org/d17. 2-vndb-names.bin is a derived database and is
+distributed under the ODbL 1.0.

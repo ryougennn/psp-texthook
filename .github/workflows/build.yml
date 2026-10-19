@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # attaching texthook.zip to a release on tag pushes
+
+env:
+  # Pinned so builds are reproducible; bump deliberately.
+  PSPDEV_RELEASE: v20260901
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # third_party/vndb-names, the VNDB Names dictionary
+
+      - name: Install the PSP toolchain
+        run: |
+          # psp-gcc's own libraries; a bare Ubuntu image lacks libmpc3
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libmpc3 zip
+          curl -fsSL "https://github.com/pspdev/pspdev/releases/download/$PSPDEV_RELEASE/pspdev-ubuntu-latest-x86_64.tar.gz" \
+            | tar -xz -C "$HOME"
+          echo "PSPDEV=$HOME/pspdev" >> "$GITHUB_ENV"
+          echo "$HOME/pspdev/bin" >> "$GITHUB_PATH"
+
+      # The popup's dictionaries: JMdict from EDRDG's current files (their
+      # licence asks for up-to-date data; each build fetches it), and VNDB
+      # Names from the submodule. LICENSES.txt goes with them.
+      - name: Build the dictionaries
+        run: |
+          mkdir -p dl
+          curl -fsSL -o dl/JMdict_e.gz http://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz
+          curl -fsSL -o dl/kanjidic2.xml.gz http://ftp.edrdg.org/pub/Nihongo/kanjidic2.xml.gz
+          make dict JMDICT=dl/JMdict_e.gz KANJIDIC=dl/kanjidic2.xml.gz
+
+      - name: Build
+        run: make dist
+
+      # upload-artifact zips the directory itself, so the downloaded
+      # artifact extracts straight to the memory stick root.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: texthook-${{ github.sha }}
+          path: build/dist/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" build/texthook.zip --clobber

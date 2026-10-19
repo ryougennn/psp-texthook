@@ -1,0 +1,3 @@
+[submodule "third_party/vndb-names"]
+	path = third_party/vndb-names
+	url = https://github.com/kaanium/VNDB-Names-for-Yomitan

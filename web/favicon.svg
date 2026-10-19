@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <!-- Chibi iris in XMB blue: deep navy under the lid, brightening to sky at the bottom. -->
+    <linearGradient id="iris" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12416b"/>
+      <stop offset="0.55" stop-color="#4088e5"/>
+      <stop offset="1" stop-color="#b3cfff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Soft tile, so the eye reads on any tab bar -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#e8f0ff"/>
+
+  <!-- Tall glossy iris, no white around it -->
+  <ellipse cx="32" cy="37" rx="16" ry="21" fill="url(#iris)"/>
+
+  <!-- Big highlights -->
+  <ellipse cx="25" cy="28" rx="6.5" ry="7.5" fill="#fff"/>
+  <circle cx="40" cy="48" r="3.2" fill="#fff"/>
+
+  <!-- Thick upper lash line resting on the iris, with a little wing -->
+  <path d="M12 25 C 19 11, 45 11, 52 25" fill="none" stroke="#18314a" stroke-width="6" stroke-linecap="round"/>
+  <path d="M50 19 L 56.5 14" fill="none" stroke="#18314a" stroke-width="4" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PSP Texthook</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="font-css" rel="stylesheet" href="">
+<style>
+  :root {
+    --bg: #000000;
+    --text: #ededed;
+    --font: 'Noto Serif JP', serif;
+    --size: 28px;
+    --line-ok: #22c55e;
+    --line-bad: #ef4444;
+    /* Camera cutouts and rounded corners. Only non-zero with viewport-fit=cover,
+     * i.e. in fullscreen on phones, where the page may draw around the hole
+     * punch. */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    /* Secondary text, derived from the user's color so any theme works. */
+    --soft: color-mix(in srgb, var(--text) 60%, transparent);
+    /* Quiet surfaces (the pomodoro bar's empty part), likewise. */
+    --accent: color-mix(in srgb, var(--text) 16%, var(--bg));
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { min-height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-weight: 400;
+    line-height: 1.85;
+  }
+
+  /* ---- top bar ---- */
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+    padding: calc(2px + var(--safe-top)) calc(6px + var(--safe-right)) 2px calc(14px + var(--safe-left));
+    background: var(--bg);
+    font-family: system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  #stats {
+    min-width: 0;
+    margin-right: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    transition: filter 0.2s ease;
+  }
+
+  /* Hovering reveals blurred stats; touch screens have no hover, so a tap
+   * toggles them instead. */
+  body.blur-stats #stats:not(.reveal) { filter: blur(5px); }
+  @media (hover: hover) {
+    body.blur-stats #stats:hover { filter: none; }
+  }
+
+  /* Phones: stats on the left edge, buttons on the right. */
+  @media (max-width: 600px) {
+    #stats { margin-right: auto; }
+  }
+
+  @media (max-width: 420px) {
+    header { font-size: 13px; padding-left: calc(10px + var(--safe-left)); gap: 2px; }
+    header button { padding: 6px; }
+  }
+
+  @media (max-width: 380px) {
+    header { font-size: 12px; gap: 0; }
+    header button { padding: 5px; }
+  }
+
+  /* 36 px tap targets around 20 px icons. */
+  header button {
+    display: flex;
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    padding: 8px;
+    opacity: 0.85;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  header button:hover { opacity: 1; }
+
+  svg.icon { width: 20px; height: 20px; }
+
+  #link { color: var(--line-bad); }
+  #link.up { color: var(--line-ok); }
+  #link .on, #link.up .off { display: none; }
+  #link.up .on { display: inline; }
+
+  #timer .pause, #timer.running .play { display: none; }
+  #timer.running .pause { display: inline; }
+
+  #fullscreen .exit, #fullscreen.on .enter { display: none; }
+  #fullscreen.on .exit { display: inline; }
+  #fullscreen[hidden] { display: none; }
+
+  #undo:disabled { opacity: 0.3; cursor: default; }
+
+  /* ---- lines ---- */
+
+  #lines {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9em;
+    padding: 4px calc(14px + var(--safe-right)) calc(12px + var(--safe-bottom)) calc(14px + var(--safe-left));
+  }
+
+  .line {
+    font-size: var(--size);
+    letter-spacing: 0.02em;
+    overflow-wrap: anywhere;
+  }
+
+  .line.new { animation: appear 0.5s ease; }
+
+  @keyframes appear {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* A line arrived while paused and was dropped. */
+  body.flash { animation: flash 0.5s cubic-bezier(0.4, 0, 0.6, 1); }
+
+  @keyframes flash {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+  }
+
+  /* Dims the page while the PSP is busy sending a screenshot (text may lag). */
+  #veil {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.6s ease;
+    z-index: 20;
+  }
+
+  body.busy #veil { opacity: 0.45; }
+
+  /* ---- pomodoro ---- */
+
+  /* Leaves room for the bar under the last line. */
+  body.pomo #lines { padding-bottom: calc(40px + var(--safe-bottom)); }
+
+  #pomo {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 15;
+    height: calc(8px + var(--safe-bottom));
+    background: var(--accent);
+    cursor: pointer;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #pomo[hidden] { display: none; }
+
+  /* A taller touch target than the bar itself. */
+  #pomo::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    height: 20px;
+  }
+
+  #pomo-fill {
+    width: 0;
+    height: 100%;
+    background: var(--text);
+    transition: width 0.5s linear, opacity 0.3s ease;
+  }
+
+  #pomo.break #pomo-fill { opacity: 0.5; }
+  #pomo.paused { opacity: 0.5; }
+
+  #pomo-label {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--text);
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  #pomo.show #pomo-label { opacity: 1; }
+  @media (hover: hover) {
+    #pomo:hover #pomo-label { opacity: 1; }
+  }
+
+  /* ---- settings ---- */
+  /*
+   * The panel and its controls are tinted toward the text color, so they read
+   * as raised surfaces on any background: lighter on dark themes, darker on
+   * light ones.
+   */
+
+  #settings {
+    --panel: color-mix(in srgb, var(--text) 7%, var(--bg));
+    --control: color-mix(in srgb, var(--text) 13%, var(--bg));
+    --control-hover: color-mix(in srgb, var(--text) 19%, var(--bg));
+    --sep: color-mix(in srgb, var(--text) 12%, transparent);
+
+    position: fixed;
+    top: calc(42px + var(--safe-top));
+    right: calc(10px + var(--safe-right));
+    z-index: 30;
+    width: min(400px, calc(100vw - 20px - var(--safe-left) - var(--safe-right)));
+    max-height: calc(100vh - 54px - var(--safe-top) - var(--safe-bottom));
+    /* phones: excludes the address bar */
+    max-height: calc(100dvh - 54px - var(--safe-top) - var(--safe-bottom));
+    overflow-y: auto;
+    padding: 6px 16px 16px;
+    background: var(--panel);
+    border: 1px solid var(--sep);
+    border-radius: 10px;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+
+  #settings[hidden] { display: none; }
+
+  #settings h2 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--soft);
+    margin: 16px 0 4px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 40px;
+    border-bottom: 1px solid var(--sep);
+  }
+
+  .row:last-of-type, .row + #custom-font { border-bottom: 0; }
+
+  .row label { flex: 1; cursor: pointer; }
+
+  #settings input, #settings select, #settings button {
+    font: inherit;
+    color: var(--text);
+    background-color: var(--control);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    height: 30px;
+    padding: 0 10px;
+    outline: none;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+  }
+
+  #settings button { cursor: pointer; }
+  /* background-color, not background: the select's arrow is a background image. */
+  #settings button:hover, #settings select:hover { background-color: var(--control-hover); }
+  #settings input:focus-visible, #settings select:focus-visible, #settings button:focus-visible {
+    border-color: var(--soft);
+  }
+
+  #settings ::placeholder { color: var(--soft); opacity: 0.7; }
+
+  /* Font size: − value + */
+  .stepper { display: flex; gap: 4px; }
+  #settings .stepper button { width: 30px; padding: 0; font-size: 16px; }
+  #settings .stepper input {
+    width: 48px;
+    padding: 0;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+  }
+  .stepper input::-webkit-inner-spin-button,
+  .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+  #settings select {
+    width: 168px;
+    padding-right: 28px;
+    appearance: none;
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--soft) 50%),
+                      linear-gradient(135deg, var(--soft) 50%, transparent 50%);
+    background-position: right 14px top 13px, right 9px top 13px;
+    background-size: 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  #settings select option { background: var(--bg); color: var(--text); }
+
+  /* Color swatches */
+  #settings input[type=color] {
+    width: 48px;
+    padding: 3px;
+    cursor: pointer;
+  }
+  #settings input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  #settings input[type=color]::-webkit-color-swatch { border: 1px solid var(--sep); border-radius: 4px; }
+  #settings input[type=color]::-moz-color-swatch { border: 1px solid var(--sep); border-radius: 4px; }
+
+  /* Checkboxes as switches */
+  #settings input[type=checkbox] {
+    appearance: none;
+    position: relative;
+    flex: none;
+    width: 36px;
+    height: 20px;
+    padding: 0;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  #settings input[type=checkbox]::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--soft);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  #settings input[type=checkbox]:checked { background: var(--text); }
+  #settings input[type=checkbox]:checked::after { transform: translateX(16px); background: var(--bg); }
+
+  #custom-font { width: 100%; margin: 2px 0 8px; }
+  #custom-font[hidden] { display: none; }
+
+  .hint { font-size: 12px; color: var(--soft); margin: 2px 0 10px; }
+  .hint code { font-size: 11px; padding: 1px 4px; border-radius: 3px; background: var(--control); }
+
+  #settings .row input[type=text] { width: 168px; }
+
+  /* Text to copy, e.g. a config line. */
+  .snippet { position: relative; margin: -4px 0 10px; }
+  .snippet pre {
+    padding: 10px 12px;
+    border: 1px solid var(--sep);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg) 60%, var(--panel));
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-x: auto;
+  }
+  #settings .snippet button { position: absolute; top: 6px; right: 6px; height: 24px; padding: 0 8px; font-size: 12px; }
+
+  .rule { display: flex; gap: 6px; margin-bottom: 6px; }
+  #settings .rule input { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 13px; }
+  #settings .rule input.bad { border-color: var(--line-bad); }
+  #settings .rule button { flex: none; width: 30px; padding: 0; color: var(--soft); }
+  #settings .rule button:hover { color: var(--text); }
+
+  #settings #add-rule { width: 100%; background: transparent; border: 1px dashed var(--sep); color: var(--soft); }
+  #settings #add-rule:hover { color: var(--text); background: var(--control); }
+
+  #settings #reset { width: 100%; height: 36px; margin-top: 20px; }
+
+  /* iOS zooms the page into any field with text under 16 px. */
+  @media (pointer: coarse) {
+    #settings input, #settings select, #settings .rule input { font-size: 16px; }
+    #settings input, #settings select, #settings button { height: 36px; }
+    #settings .stepper button, #settings .rule button { width: 36px; }
+  }
+
+  /* ---- notifications ---- */
+
+  #toasts {
+    position: fixed;
+    top: calc(42px + var(--safe-top));
+    right: calc(10px + var(--safe-right));
+    z-index: 45;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    pointer-events: none;
+  }
+
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(320px, calc(100vw - 20px - var(--safe-left) - var(--safe-right)));
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--text) 7%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+    border-radius: 10px;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    animation: toast-in 0.25s ease;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+
+  .toast::before {
+    content: '';
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--soft);
+  }
+  .toast.success::before { background: var(--line-ok); }
+  .toast.error::before { background: var(--line-bad); }
+  .toast.warning::before { background: #f59e0b; }
+
+  .toast.out { opacity: 0; transform: translateY(-6px); }
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(-6px); }
+  }
+
+  /* Wake fallback (see the script): fills the viewport so browsers count it
+   * as a visible video, but is never seen or touched. */
+  #wake-video {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    pointer-events: none;
+    z-index: -1;
+  }
+  #settings #reset:hover {
+    color: var(--line-bad);
+    background: color-mix(in srgb, var(--line-bad) 14%, var(--control));
+  }
+</style>
+</head>
+<body>
+  <header>
+    <span id="stats" title="Reading time (characters per hour) characters / lines"></span>
+    <button id="link" title="Connection to the PSP">
+      <svg class="icon off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.181 8.68a4.503 4.503 0 0 1 1.903 6.405m-9.768-2.782L3.56 14.06a4.5 4.5 0 0 0 6.364 6.365l3.129-3.129m5.614-5.615 1.757-1.757a4.5 4.5 0 0 0-6.364-6.365l-4.5 4.5c-.258.26-.479.541-.661.84m1.903 6.405a4.495 4.495 0 0 1-1.242-.88 4.483 4.483 0 0 1-1.06-1.683m6.587 2.345 5.907 5.907m-5.907-5.907L8.898 8.898M2.991 2.99 8.898 8.9"/></svg>
+      <svg class="icon on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244"/></svg>
+    </button>
+    <button id="timer" title="Start/pause the reading timer">
+      <svg class="icon play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a.75.75 0 0 0 1.13.65l12.5-7.5a.75.75 0 0 0 0-1.3L8.13 3.85A.75.75 0 0 0 7 4.5Z"/></svg>
+      <svg class="icon pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></svg>
+    </button>
+    <button id="undo" title="Undo the newest line">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3"/></svg>
+    </button>
+    <button id="fullscreen" title="Fullscreen" hidden>
+      <svg class="icon enter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15"/></svg>
+      <svg class="icon exit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9V4.5M9 9H4.5M9 9 3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5 5.25 5.25"/></svg>
+    </button>
+    <button id="gear" title="Settings">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"/><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>
+    </button>
+  </header>
+
+  <div id="settings" hidden>
+    <h2>Text</h2>
+    <div class="row">
+      <label for="s-size">Font size</label>
+      <div class="stepper"><button id="size-down" title="Smaller">−</button><input id="s-size" type="number" min="10" max="100"><button id="size-up" title="Larger">+</button></div>
+    </div>
+    <div class="row">
+      <label for="s-font">Font</label>
+      <select id="s-font">
+        <option>Noto Serif JP</option>
+        <option>Noto Sans JP</option>
+        <option>Klee One</option>
+        <option>Shippori Mincho</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </div>
+    <input id="custom-font" type="text" placeholder="Font family installed on this device" hidden>
+    <div class="row"><label for="s-bg">Background</label><input id="s-bg" type="color"></div>
+    <div class="row"><label for="s-fg">Text</label><input id="s-fg" type="color"></div>
+
+    <h2>Behavior</h2>
+    <div class="row"><label for="s-blur">Blur stats</label><input id="s-blur" type="checkbox"></div>
+    <div class="row"><label for="s-flash">Flash on missed line</label><input id="s-flash" type="checkbox"></div>
+    <div class="row"><label for="s-unpause">Unpause on new line</label><input id="s-unpause" type="checkbox"></div>
+    <div class="row"><label for="s-nodupes">Prevent global duplicate</label><input id="s-nodupes" type="checkbox"></div>
+
+    <h2>Pomodoro</h2>
+    <div class="row"><label for="s-pomo">Show bar</label><input id="s-pomo" type="checkbox"></div>
+    <div class="row">
+      <label for="s-pomo-read">Read (min)</label>
+      <div class="stepper"><button data-step="s-pomo-read:-1" title="Shorter">−</button><input id="s-pomo-read" type="number" min="1" max="180"><button data-step="s-pomo-read:1" title="Longer">+</button></div>
+    </div>
+    <div class="row">
+      <label for="s-pomo-break">Break (min)</label>
+      <div class="stepper"><button data-step="s-pomo-break:-1" title="Shorter">−</button><input id="s-pomo-break" type="number" min="1" max="180"><button data-step="s-pomo-break:1" title="Longer">+</button></div>
+    </div>
+
+    <h2>Anki</h2>
+    <div class="row"><label for="s-anki">Screenshot new cards</label><input id="s-anki" type="checkbox"></div>
+    <div class="row"><label for="s-anki-url">AnkiConnect</label><input id="s-anki-url" type="text" spellcheck="false"></div>
+    <div class="row"><label for="s-anki-field">Picture field</label><input id="s-anki-field" type="text" spellcheck="false"></div>
+    <p class="hint">Adds a screenshot of the PSP's screen to each card made today. AnkiConnect's <code>webCorsOriginList</code> must include this page's origin. Paste this into Tools → Add-ons → AnkiConnect → Config:</p>
+    <div class="snippet"><pre><code id="anki-cors"></code></pre><button id="anki-cors-copy">Copy</button></div>
+
+    <h2>Replacements</h2>
+    <p class="hint">Applied in order to every new line. JavaScript regex, all matches; leave the replacement empty to delete. <code>$1</code> inserts a group.</p>
+    <div id="rules"></div>
+    <button id="add-rule">Add rule</button>
+
+    <button id="reset">Reset session</button>
+  </div>
+
+  <div id="lines"></div>
+  <div id="pomo" hidden><div id="pomo-fill"></div><div id="pomo-label"></div></div>
+  <div id="veil"></div>
+  <div id="toasts"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // ---- storage ----------------------------------------------------------
+  //
+  // The session (lines, counters, timer) lives on the PSP, shared by every
+  // device. This browser's localStorage, per PSP address, keeps:
+  //   thk.settings  appearance, behavior, Anki, replacement rules
+  //   thk.session   a copy of the session and its newest lines, shown until
+  //                 the PSP answers
+  //   thk.seq       last line id received, so a reload resumes the stream
+  //                 instead of replaying the newest line again
+
+  function load(key, fallback) {
+    try {
+      const v = JSON.parse(localStorage.getItem(key));
+      return v === null ? fallback : v;
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  function save(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (err) {
+      console.warn('Failed to save', key, err);
+    }
+  }
+
+  const DEFAULTS = {
+    size: window.matchMedia('(max-width: 600px)').matches ? 22 : 28,
+    font: 'Noto Serif JP',
+    customFont: '',
+    bg: '#000000',
+    fg: '#ededed',
+    blur: false,
+    flash: true,
+    unpause: true,
+    noDupes: false,     // drop a line already shown anywhere in this session
+    rules: [],          // [{ pattern, replace }]
+    pomo: true,         // the pomodoro bar
+    pomoRead: 25,       // minutes
+    pomoBreak: 5,
+    anki: true,         // screenshot new Anki cards
+    ankiUrl: 'http://localhost:8765',
+    ankiField: 'Picture',
+  };
+
+  const settings = Object.assign({}, DEFAULTS, load('thk.settings', {}));
+  // lines: [{ key, text }] shown on this page; count/chars/elapsed/running
+  // are the PSP's. Sessions from before they moved to the PSP had plain
+  // strings and their own counters: those are left behind.
+  const session = Object.assign({ lines: [], count: 0, chars: 0, elapsed: 0, running: false },
+                                load('thk.session', {}));
+  if (session.lines.some((l) => typeof l !== 'object')) {
+    Object.assign(session, { lines: [], count: 0, chars: 0, elapsed: 0 });
+  }
+  session.running = false;  // until the PSP says so
+  let lastSeq = load('thk.seq', null);
+
+  const saveSettings = () => save('thk.settings', settings);
+  const KEEP_LINES = 200;   // lines kept in the copy
+  const saveSession = () => save('thk.session', { ...session, lines: session.lines.slice(-KEEP_LINES) });
+
+  // ---- appearance -------------------------------------------------------
+
+  const GOOGLE_FONTS = ['Noto Serif JP', 'Noto Sans JP', 'Klee One', 'Shippori Mincho'];
+
+  function applyLook() {
+    const root = document.documentElement.style;
+    const family = settings.font === 'custom' ? settings.customFont : settings.font;
+    root.setProperty('--font', `'${family || 'serif'}', serif`);
+    root.setProperty('--size', `${settings.size}px`);
+    root.setProperty('--bg', settings.bg);
+    root.setProperty('--text', settings.fg);
+    document.body.classList.toggle('blur-stats', settings.blur);
+    document.body.classList.toggle('pomo', settings.pomo);
+    $('pomo').hidden = !settings.pomo;
+
+    // Only the chosen Google font is fetched. Without internet on the viewing
+    // device it falls back to the system's serif font.
+    const css = $('font-css');
+    const href = GOOGLE_FONTS.includes(family)
+      ? `https://fonts.googleapis.com/css2?family=${family.replace(/ /g, '+')}:wght@400&display=swap`
+      : '';
+    if (css.getAttribute('href') !== href) css.setAttribute('href', href);
+  }
+
+  // ---- stats and timer --------------------------------------------------
+  //
+  // The PSP keeps the time. Every "session" event carries its elapsed time
+  // and whether the timer runs; in between, the page counts on from when the
+  // event arrived. The PSP also pauses the timer itself after a minute
+  // without a new line, taking that idle minute back off (like Kizuna).
+
+  let stateAt = Date.now();
+
+  function elapsedNow() {
+    return session.elapsed + (session.running ? Date.now() - stateAt : 0);
+  }
+
+  function clock(ms) {
+    const s = Math.floor(ms / 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+  }
+
+  function renderStats() {
+    // Kizuna's layout: time (chars per hour) chars / lines. Both use whole
+    // seconds, so the rate changes with the clock (or a new line), not in
+    // between.
+    const ms = Math.floor(elapsedNow() / 1000) * 1000;
+    const perHour = ms >= 1000 ? Math.round(session.chars / (ms / 3600000)) : 0;
+    const num = (n) => n.toLocaleString('en-US');
+    $('stats').textContent = `${clock(ms)} (${num(perHour)}/h) ${num(session.chars)} / ${num(session.count)}`;
+    $('undo').disabled = session.lines.length === 0;
+  }
+
+  // Characters read: only ones with linguistic content (kana, kanji,
+  // letters, digits), not punctuation, brackets, quotes or symbols.
+  const NOT_JAPANESE_REGEX = /[^0-9A-Z○◯々-〇〻ぁ-ゖゝ-ゞァ-ヺー０-９Ａ-Ｚｦ-ﾝ\p{Radical}\p{Unified_Ideograph}]+/gimu;
+  const countChars = (text) => [...text.replace(NOT_JAPANESE_REGEX, '')].length;
+
+  $('timer').onclick = () => {
+    const start = !session.running;
+    send(start ? '/session/resume' : '/session/pause');
+    pomoFollow(start);
+  };
+  $('stats').onclick = () => $('stats').classList.toggle('reveal');
+
+  setInterval(renderStats, 250);
+
+  // ---- the PSP's session ------------------------------------------------
+  //
+  // Changes are posted to the PSP one at a time, in order, and only take
+  // effect when its "session" event comes back, on every page at once:
+  //   POST /session/line?boot=B&seq=S&chars=N&resume=0|1   body: the text
+  //   POST /session/undo?boot=B&seq=S, /pause, /resume, /reset
+  // A line that didn't get through is retried; a 409 means another page
+  // counted it first (or the PSP restarted since). Other changes are sent
+  // once: a pause that arrived minutes later would be worse than none.
+
+  const outbox = [];
+  let sending = false;
+  let boot = null;          // the PSP's current load; line keys are boot-seq
+
+  const keyOf = (line) => `${line.boot}-${line.seq}`;
+
+  // retry: a line, whose key is kept so a reload of the lines keeps it too.
+  function send(path, body = '', retry = false, key = null) {
+    outbox.push({ path, body, retry, key });
+    flush();
+  }
+
+  async function flush() {
+    if (sending) return;
+    sending = true;
+    while (outbox.length) {
+      const req = outbox[0];
+      let status = 0;
+      try {
+        // A text body keeps it a "simple" request: no CORS preflight.
+        status = (await fetch(req.path, { method: 'POST', body: req.body })).status;
+      } catch (err) {
+        // offline: status stays 0
+      }
+      if (req.retry && (status === 0 || status === 503)) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (status >= 400 && status !== 409) console.warn('PSP refused', req.path, status);
+      outbox.shift();
+    }
+    sending = false;
+  }
+
+  function applyState(st) {
+    boot = st.boot;
+    session.count = st.lines;
+    session.chars = st.chars;
+    session.elapsed = st.elapsed;
+    session.running = st.running;
+    stateAt = Date.now();
+    $('timer').classList.toggle('running', st.running);
+    saveSession();
+    renderStats();
+  }
+
+  // The newest lines, from the PSP's session log (one JSON record per line),
+  // when a stream opens. Lines added while it loads are kept.
+  let arriving = null;
+
+  async function loadTail() {
+    arriving = [];
+    let records;
+    try {
+      const res = await fetch('/session/log?tail=32768');
+      records = (await res.text()).split('\n');
+    } catch (err) {
+      arriving = null;
+      return;
+    }
+
+    const lines = [];
+    for (const rec of records) {
+      let r;
+      try {
+        r = JSON.parse(rec);
+      } catch (err) {
+        continue;  // blank, or cut short
+      }
+      if (r.op === 'line') {
+        lines.push({ key: keyOf(r), text: r.text });
+      } else if (r.op === 'undo') {
+        const i = lines.findLastIndex((l) => l.key === keyOf(r));
+        if (i >= 0) lines.splice(i, 1);
+      }
+    }
+    for (const l of arriving) {
+      if (!lines.some((m) => m.key === l.key)) lines.push(l);
+    }
+    // Lines still waiting to be posted stay too.
+    for (const l of session.lines) {
+      if (outbox.some((req) => req.key === l.key) && !lines.some((m) => m.key === l.key)) {
+        lines.push(l);
+      }
+    }
+    arriving = null;
+
+    session.lines = lines;
+    container.replaceChildren(...lines.map((l) => lineElement(l, false)));
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    saveSession();
+    renderStats();
+  }
+
+  function onSession(st) {
+    applyState(st);
+    if (st.op === 'state') {
+      loadTail();
+    } else if (st.op === 'line') {
+      const line = { key: keyOf(st.line), text: st.line.text };
+      if (arriving) arriving.push(line);
+      addLine(line);
+    } else if (st.op === 'undo') {
+      removeLine(keyOf(st.line));
+    } else if (st.op === 'reset') {
+      session.lines = [];
+      container.replaceChildren();
+      saveSession();
+      renderStats();
+    }
+  }
+
+  // ---- lines ------------------------------------------------------------
+
+  const container = $('lines');
+
+  // New lines push the old ones up with a short glide instead of a jump:
+  // scroll to the bottom immediately, then start the container shifted back
+  // down by the distance scrolled and animate that offset to zero (FLIP).
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let glide = null;
+
+  function lineElement(line, animate) {
+    const el = document.createElement('div');
+    el.className = animate ? 'line new' : 'line';
+    el.dataset.key = line.key;
+    el.textContent = line.text;
+    return el;
+  }
+
+  function showLine(line) {
+    // Scrolled up to re-read something: add the line without moving.
+    const doc = document.documentElement;
+    if (!glide && window.scrollY + window.innerHeight < doc.scrollHeight - 80) {
+      container.appendChild(lineElement(line, true));
+      return;
+    }
+
+    // Where the lines are drawn right now, including any glide in progress,
+    // so a line arriving mid-animation continues from there.
+    const carry = glide ? new DOMMatrixReadOnly(getComputedStyle(container).transform).m42 : 0;
+    if (glide) glide.cancel();
+    const before = window.scrollY;
+
+    container.appendChild(lineElement(line, true));
+
+    // keep the newest line in view as they stack down
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    const offset = window.scrollY - before + carry;
+
+    glide = null;
+    if (offset > 0 && !reduceMotion) {
+      glide = container.animate(
+        [{ transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' }],
+        { duration: 250, easing: 'cubic-bezier(0.2, 0.7, 0.2, 1)' }
+      );
+      glide.onfinish = () => { glide = null; };
+    }
+  }
+
+  function flash() {
+    document.body.classList.remove('flash');
+    void document.body.offsetWidth;  // restart the animation
+    document.body.classList.add('flash');
+  }
+
+  document.body.addEventListener('animationend', (e) => {
+    if (e.animationName === 'flash') document.body.classList.remove('flash');
+  });
+
+  const hasLine = (key) => session.lines.some((l) => l.key === key);
+
+  function addLine(line) {
+    if (hasLine(line.key)) return;
+    session.lines.push(line);
+    saveSession();
+    renderStats();
+    showLine(line);
+  }
+
+  function removeLine(key) {
+    const i = session.lines.findLastIndex((l) => l.key === key);
+    if (i < 0) return;
+    session.lines.splice(i, 1);
+    const el = container.querySelector(`[data-key="${key}"]`);
+    if (el) el.remove();
+    saveSession();
+    renderStats();
+  }
+
+  // A line from the stream. If this page counts it, it's shown at once and
+  // posted to the PSP, whose "line" event then finds it already here.
+  function receiveLine(raw, seq) {
+    const text = applyRules(raw).trim();
+    if (text === '' || boot === null) return;
+    const line = { key: keyOf({ boot, seq }), text };
+    if (hasLine(line.key)) return;
+
+    // Checked before the pause logic: a repeat is ignored outright, so it
+    // neither unpauses the timer nor flashes as a missed line.
+    if (settings.noDupes && session.lines.some((l) => l.text === text)) return;
+
+    // Paused means not reading: the line is dropped, not shown or counted.
+    if (!session.running && !settings.unpause) {
+      if (settings.flash) flash();
+      return;
+    }
+
+    addLine(line);
+    send(`/session/line?boot=${boot}&seq=${seq}&chars=${countChars(text)}` +
+         `&resume=${settings.unpause ? 1 : 0}`, text, true, line.key);
+  }
+
+  $('reset').onclick = () => {
+    if (!confirm('Clear all lines and reset the counters and timer?')) return;
+    send('/session/reset');
+    $('settings').hidden = true;
+  };
+
+  // ---- replacements -----------------------------------------------------
+
+  function applyRules(text) {
+    for (const rule of settings.rules) {
+      if (!rule.pattern) continue;
+      try {
+        text = text.replace(new RegExp(rule.pattern, 'g'), rule.replace || '');
+      } catch (err) {
+        // Invalid pattern: skipped (and outlined red in the settings).
+      }
+    }
+    return text;
+  }
+
+  function validPattern(p) {
+    try {
+      new RegExp(p);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function renderRules() {
+    const list = $('rules');
+    list.replaceChildren();
+    settings.rules.forEach((rule, i) => {
+      const row = document.createElement('div');
+      row.className = 'rule';
+
+      const pat = document.createElement('input');
+      pat.placeholder = 'pattern';
+      pat.value = rule.pattern;
+      pat.classList.toggle('bad', !validPattern(rule.pattern));
+      pat.oninput = () => {
+        rule.pattern = pat.value;
+        pat.classList.toggle('bad', !validPattern(pat.value));
+        saveSettings();
+      };
+
+      const rep = document.createElement('input');
+      rep.placeholder = 'replacement';
+      rep.value = rule.replace;
+      rep.oninput = () => { rule.replace = rep.value; saveSettings(); };
+
+      const del = document.createElement('button');
+      del.textContent = '×';
+      del.title = 'Remove rule';
+      del.onclick = () => { settings.rules.splice(i, 1); saveSettings(); renderRules(); };
+
+      row.append(pat, rep, del);
+      list.appendChild(row);
+    });
+  }
+
+  $('add-rule').onclick = () => {
+    settings.rules.push({ pattern: '', replace: '' });
+    saveSettings();
+    renderRules();
+    $('rules').lastChild.firstChild.focus();
+  };
+
+  // ---- discard ----------------------------------------------------------
+  //
+  // Drops the newest line, e.g. one the backlog re-sent, and takes it back
+  // off the counters. The timer is left alone. The PSP only takes it if it's
+  // still the newest line there, so two pages can't each drop one.
+
+  $('undo').onclick = () => {
+    const line = session.lines[session.lines.length - 1];
+    if (!line) return;
+    const [lineBoot, seq] = line.key.split('-');
+    send(`/session/undo?boot=${lineBoot}&seq=${seq}`);
+  };
+
+  // ---- fullscreen -------------------------------------------------------
+  //
+  // The only way to get rid of a phone's address bar on a plain-http page.
+  // Hidden where the browser can't do it (iPhone Safari only allows video).
+
+  if (document.fullscreenEnabled) {
+    const fs = $('fullscreen');
+    fs.hidden = false;
+    fs.onclick = () => {
+      const req = document.fullscreenElement
+        ? document.exitFullscreen()
+        : document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+      req.catch((err) => console.warn('Fullscreen refused:', err));
+    };
+    document.addEventListener('fullscreenchange', () => {
+      const on = !!document.fullscreenElement;
+      fs.classList.toggle('on', on);
+      fs.title = on ? 'Exit fullscreen' : 'Fullscreen';
+    });
+  }
+
+  // ---- pomodoro ---------------------------------------------------------
+  //
+  // Read and break intervals that take turns by themselves, with a bell at
+  // each change: one strike when reading ends, two when the break does. Tap
+  // the bar to start or pause, hold it to reset. It runs on an end time, so
+  // a tab the browser slowed down in the background is never off.
+  //
+  // left: ms remaining while paused; null and not running = not started.
+
+  const pomo = Object.assign({ phase: 'read', running: false, left: null, endAt: 0 },
+                             load('thk.pomo', {}));
+  const savePomo = () => save('thk.pomo', pomo);
+  const HOLD = 600;
+  let pomoShowTimer = 0;
+  let audio = null;
+
+  const phaseLength = () => (pomo.phase === 'read' ? settings.pomoRead : settings.pomoBreak) * 60000;
+  const pomoLeft = () => Math.max(0, pomo.running ? pomo.endAt - Date.now() : (pomo.left ?? phaseLength()));
+
+  // A small bell, made on the spot: a few sine partials at a bell's ratios,
+  // each fading out on its own.
+  function strike(at) {
+    for (const [ratio, gain, decay] of [[1, 0.35, 2.4], [2, 0.18, 1.6], [2.76, 0.12, 1.1], [5.4, 0.05, 0.5]]) {
+      const osc = audio.createOscillator();
+      const env = audio.createGain();
+      osc.frequency.value = 1046.5 * ratio;  // C6
+      env.gain.setValueAtTime(0.0001, at);
+      env.gain.exponentialRampToValueAtTime(gain, at + 0.005);
+      env.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+      osc.connect(env).connect(audio.destination);
+      osc.start(at);
+      osc.stop(at + decay);
+    }
+  }
+
+  function bell(times) {
+    if (!audio) return;
+    for (let i = 0; i < times; i++) strike(audio.currentTime + 0.05 + i * 0.4);
+  }
+
+  function renderPomo() {
+    const left = pomoLeft();
+    const started = pomo.running || pomo.left !== null;
+    const bar = $('pomo');
+    bar.classList.toggle('break', pomo.phase === 'break');
+    bar.classList.toggle('paused', started && !pomo.running);
+    $('pomo-fill').style.width = `${started ? (1 - left / phaseLength()) * 100 : 0}%`;
+
+    const s = Math.ceil(left / 1000);
+    const time = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const what = pomo.phase === 'read' ? 'Reading' : 'Break';
+    $('pomo-label').textContent = !started ? 'Tap to start reading'
+      : pomo.running ? `${what} · ${time}` : `Paused · ${what} ${time}`;
+  }
+
+  function showPomoLabel(ms) {
+    $('pomo').classList.add('show');
+    clearTimeout(pomoShowTimer);
+    pomoShowTimer = setTimeout(() => $('pomo').classList.remove('show'), ms);
+  }
+
+  function pomoTick() {
+    if (pomo.running && Date.now() >= pomo.endAt) {
+      bell(pomo.phase === 'read' ? 1 : 2);
+      pomo.phase = pomo.phase === 'read' ? 'break' : 'read';
+      pomo.endAt = Date.now() + phaseLength();
+      savePomo();
+      showPomoLabel(5000);
+    }
+    renderPomo();
+  }
+
+  function pomoToggle() {
+    // The first tap also unlocks sound, which browsers only allow after one.
+    if (!audio && window.AudioContext) audio = new AudioContext();
+    if (audio && audio.state === 'suspended') audio.resume();
+
+    if (pomo.running) {
+      pomo.left = pomo.endAt - Date.now();
+      pomo.running = false;
+    } else {
+      pomo.endAt = Date.now() + (pomo.left ?? phaseLength());
+      pomo.left = null;
+      pomo.running = true;
+    }
+    savePomo();
+    renderPomo();
+    showPomoLabel(2500);
+  }
+
+  // The reading timer's button starts and stops a read block too (not a
+  // break, which runs on while you're away).
+  function pomoFollow(start) {
+    if (settings.pomo && pomo.phase === 'read' && pomo.running !== start) pomoToggle();
+  }
+
+  function pomoReset() {
+    Object.assign(pomo, { phase: 'read', running: false, left: null });
+    savePomo();
+    renderPomo();
+    showPomoLabel(2500);
+    if (navigator.vibrate) navigator.vibrate(30);
+  }
+
+  // Tap or hold, the same with a mouse, a pen or a finger.
+  {
+    const bar = $('pomo');
+    let holdTimer = 0;
+    let held = false;
+    bar.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      held = false;
+      holdTimer = setTimeout(() => { held = true; pomoReset(); }, HOLD);
+    });
+    bar.addEventListener('pointerup', () => {
+      clearTimeout(holdTimer);
+      if (!held && holdTimer) pomoToggle();
+      holdTimer = 0;
+    });
+    for (const type of ['pointerleave', 'pointercancel']) {
+      bar.addEventListener(type, () => { clearTimeout(holdTimer); holdTimer = 0; });
+    }
+    bar.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  setInterval(pomoTick, 500);
+
+  // ---- settings panel ---------------------------------------------------
+
+  function bind(id, key, read) {
+    const el = $(id);
+    if (el.type === 'checkbox') el.checked = settings[key];
+    else el.value = settings[key];
+    el.addEventListener('input', () => {
+      settings[key] = read(el);
+      saveSettings();
+      applyLook();
+      $('custom-font').hidden = settings.font !== 'custom';
+    });
+  }
+
+  bind('s-size', 'size', (el) => Math.min(100, Math.max(10, Number(el.value) || DEFAULTS.size)));
+
+  function stepSize(by) {
+    const el = $('s-size');
+    el.value = Math.min(100, Math.max(10, settings.size + by));
+    el.dispatchEvent(new Event('input'));
+  }
+
+  $('size-down').onclick = () => stepSize(-1);
+  $('size-up').onclick = () => stepSize(1);
+  bind('s-font', 'font', (el) => el.value);
+  bind('custom-font', 'customFont', (el) => el.value.trim());
+  bind('s-bg', 'bg', (el) => el.value);
+  bind('s-fg', 'fg', (el) => el.value);
+  bind('s-blur', 'blur', (el) => el.checked);
+  bind('s-flash', 'flash', (el) => el.checked);
+  bind('s-unpause', 'unpause', (el) => el.checked);
+  bind('s-nodupes', 'noDupes', (el) => el.checked);
+  bind('s-pomo', 'pomo', (el) => el.checked);
+  const minutes = (key) => (el) => Math.min(180, Math.max(1, Math.round(Number(el.value)) || DEFAULTS[key]));
+  bind('s-pomo-read', 'pomoRead', minutes('pomoRead'));
+  bind('s-pomo-break', 'pomoBreak', minutes('pomoBreak'));
+  bind('s-anki', 'anki', (el) => el.checked);
+  bind('s-anki-url', 'ankiUrl', (el) => el.value.trim() || DEFAULTS.ankiUrl);
+  bind('s-anki-field', 'ankiField', (el) => el.value.trim() || DEFAULTS.ankiField);
+
+  // AnkiConnect's setting for this page's address, ready to paste.
+  // http://localhost is its default, kept so other tools keep working.
+  const corsOrigins = [...new Set(['http://localhost', location.origin])];
+  $('anki-cors').textContent = `"webCorsOriginList": ${JSON.stringify(corsOrigins, null, 4)}`;
+  $('anki-cors-copy').onclick = async () => {
+    const btn = $('anki-cors-copy');
+    try {
+      await navigator.clipboard.writeText($('anki-cors').textContent);
+      btn.textContent = 'Copied';
+    } catch (err) {
+      // No clipboard (not https): select it for a manual copy instead.
+      getSelection().selectAllChildren($('anki-cors'));
+      btn.textContent = 'Press Ctrl+C';
+    }
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  };
+  for (const btn of document.querySelectorAll('[data-step]')) {
+    const [id, by] = btn.dataset.step.split(':');
+    btn.onclick = () => {
+      const el = $(id);
+      el.value = Math.min(180, Math.max(1, Number(el.value) + Number(by)));
+      el.dispatchEvent(new Event('input'));
+      renderPomo();
+    };
+  }
+  $('custom-font').hidden = settings.font !== 'custom';
+
+  $('gear').onclick = (e) => {
+    e.stopPropagation();
+    $('settings').hidden = !$('settings').hidden;
+  };
+
+  // Click outside or Escape closes the panel.
+  document.addEventListener('click', (e) => {
+    // composedPath, not contains(): deleting a rule detaches the clicked button.
+    if (!$('settings').hidden && !e.composedPath().includes($('settings'))) $('settings').hidden = true;
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') $('settings').hidden = true;
+  });
+
+  // ---- restore ----------------------------------------------------------
+
+  applyLook();
+  renderPomo();
+  renderRules();
+  container.replaceChildren(...session.lines.map((l) => lineElement(l, false)));
+  renderStats();
+  window.scrollTo(0, document.documentElement.scrollHeight);
+
+  // ---- screen wake ----------------------------------------------------
+  //
+  // Keeps the screen on while the PSP connection is alive by looping a tiny
+  // silent video invisibly; browsers keep the screen on for a playing video.
+  // (The Wake Lock API only exists on https pages, and the PSP serves plain
+  // http.) Playback may need a first tap on the page, so a refused play() is
+  // retried on the next tap.
+
+  const WAKE_VIDEO = 'data:video/mp4;base64,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';
+  let wantAwake = false;
+  let wakeVideo = null;
+  let wakeState = 'off';
+
+  // off, video (playing), tap (waiting for a tap), failed
+  function showWake(state) {
+    wakeState = state;
+  }
+
+  async function setAwake(on) {
+    wantAwake = on;
+    if (!wakeVideo) {
+      wakeVideo = document.createElement('video');
+      wakeVideo.id = 'wake-video';
+      wakeVideo.muted = true;
+      wakeVideo.loop = true;
+      wakeVideo.playsInline = true;
+      wakeVideo.setAttribute('playsinline', '');
+      wakeVideo.setAttribute('aria-hidden', 'true');
+      wakeVideo.src = WAKE_VIDEO;
+      document.body.appendChild(wakeVideo);
+    }
+    if (!on) {
+      wakeVideo.pause();
+      showWake('off');
+      return;
+    }
+    try {
+      await wakeVideo.play();
+      // The link may have dropped while play() was pending.
+      if (!wantAwake) {
+        wakeVideo.pause();
+        return;
+      }
+      showWake('video');
+    } catch (err) {
+      showWake(err.name === 'NotAllowedError' ? 'tap' : 'failed');
+    }
+  }
+
+  // Browsers may pause the video while the tab is hidden; restart it.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wantAwake) setAwake(true);
+  });
+
+  document.addEventListener('pointerdown', () => {
+    if (wantAwake && wakeState === 'tap') setAwake(true);
+  });
+
+  showWake('off');
+
+  // ---- SSE stream -------------------------------------------------------
+  //
+  // Line events, already decoded and de-duplicated on the PSP:
+  //   id: <seq>
+  //   data: {"seq": <n>, "hook": "<hook name>", "text": "<UTF-8 line>"}
+  // The PSP sends "event: alive" after 5 s without anything else, so a
+  // stream that has been silent for much longer is dead even if the browser
+  // hasn't noticed (the PSP slept, or left Wi-Fi range). The page then
+  // reconnects itself with ?since=, which replays anything it missed.
+
+  const DEAD_AFTER = 15000;
+  let es = null;
+  let lastHeard = 0;
+
+  function setLink(up) {
+    if ($('link').classList.contains('up') === up) return;
+    $('link').classList.toggle('up', up);
+    setAwake(up);
+  }
+
+  function heard() {
+    lastHeard = Date.now();
+    setLink(true);
+  }
+
+  function connect() {
+    if (es) es.close();
+    lastHeard = Date.now();
+    es = new EventSource(lastSeq === null ? '/events' : `/events?since=${lastSeq}`);
+
+    es.onopen = () => {
+      heard();
+      setBusy(false);  // the PSP re-announces a transfer that's still running
+    };
+
+    es.onerror = () => setLink(false);  // the browser retries by itself
+
+    es.onmessage = (e) => {
+      heard();
+      let payload;
+      try {
+        payload = JSON.parse(e.data);
+      } catch (err) {
+        console.warn('Failed to parse event payload:', e.data, err);
+        return;
+      }
+      // Not compared with the old value: seq restarts at 1 when the PSP reboots.
+      lastSeq = payload.seq;
+      save('thk.seq', lastSeq);
+      receiveLine(payload.text || '', payload.seq);
+    };
+
+    es.addEventListener('alive', heard);
+
+    es.addEventListener('session', (e) => {
+      heard();
+      try {
+        onSession(JSON.parse(e.data));
+      } catch (err) {
+        console.warn('Failed to parse session event:', e.data, err);
+      }
+    });
+
+    es.addEventListener('screenshot', (e) => {
+      heard();
+      try {
+        setBusy(JSON.parse(e.data).state === 'start');
+      } catch (err) {
+        setBusy(false);
+      }
+    });
+  }
+
+  setInterval(() => {
+    if (Date.now() - lastHeard > DEAD_AFTER) {
+      setLink(false);
+      connect();
+    }
+  }, 1000);
+
+  // Clicking the link icon forces a reconnect.
+  $('link').onclick = connect;
+
+  // ---- screenshot indicator -------------------------------------------
+  //
+  // While the PSP sends a screenshot its Wi-Fi is busy and new lines may
+  // lag, so the page dims until the transfer ends:
+  //   event: screenshot
+  //   data: {"state": "start"} | {"state": "done", "ok": true|false}
+
+  let busyTimer = 0;
+
+  function setBusy(busy) {
+    document.body.classList.toggle('busy', busy);
+    clearTimeout(busyTimer);
+    // Safety net in case "done" never arrives.
+    if (busy) busyTimer = setTimeout(() => setBusy(false), 60000);
+  }
+
+  connect();
+</script>
+<script>
+  /**
+   * Anki Auto Screenshot Capture, ported from its userscript.
+   *
+   * Watches Anki (through AnkiConnect) for cards added today. When one appears,
+   * a screenshot of the PSP's screen goes into the newest card's picture field,
+   * unless it already has one. AnkiConnect's address and the field come from
+   * the page's settings.
+   */
+
+  (function() {
+    'use strict';
+
+    // Configuration
+    const POLL_INTERVAL = 1000; // Check every 1 second
+
+    let currentNoteIds = new Set();
+    let firstRun = true;
+    let isCapturing = false;
+
+    // Start polling for new Anki cards
+    startPolling();
+
+    async function startPolling() {
+      console.log('Started polling Anki for new cards...');
+
+      while (true) {
+        await checkForNewCards();
+        await sleep(POLL_INTERVAL);
+      }
+    }
+
+    async function checkForNewCards() {
+      // Turned off: the cards already there when it's turned back on aren't new.
+      if (!settings.anki) {
+        firstRun = true;
+        return;
+      }
+
+      try {
+        const updatedNoteIds = await getNoteIds();
+        const newCardIds = difference(updatedNoteIds, currentNoteIds);
+
+        if (newCardIds.size > 0 && !firstRun) {
+          console.log('Detected new card in Anki! Capturing screenshot...');
+
+          if (!isCapturing) {
+            isCapturing = true;
+            await captureAndAddToAnki();
+            isCapturing = false;
+          }
+        }
+
+        firstRun = false;
+        currentNoteIds = updatedNoteIds;
+
+      } catch (error) {
+        console.error('Error checking for new cards:', error);
+      }
+    }
+
+    async function getNoteIds() {
+      const noteIds = await ankiInvoke('findNotes', { query: 'added:1' });
+      return new Set(noteIds);
+    }
+
+    function difference(setA, setB) {
+      const diff = new Set();
+      for (const elem of setA) {
+        if (!setB.has(elem)) {
+          diff.add(elem);
+        }
+      }
+      return diff;
+    }
+
+    async function captureAndAddToAnki() {
+      try {
+        // Small delay to ensure card is fully created
+        await sleep(500);
+
+        // Capture the screenshot
+        const pngDataUrl = await capturePspScreenshot();
+
+        // Get the latest Anki card
+        const lastNote = await getLastAnkiCard();
+
+        if (!lastNote || !lastNote.noteId) {
+          showNotification('No Anki cards found for today', 'error');
+          return;
+        }
+
+        // Check if card already has an image
+        const pictureField = lastNote.fields[settings.ankiField];
+        if (pictureField && pictureField.value) {
+          console.log('Latest card already has an image, skipping');
+          return;
+        }
+
+        // Convert data URL to base64
+        const base64Data = pngDataUrl.split(',')[1];
+
+        // Generate filename
+        const filename = `screenshot_${Date.now()}.png`;
+
+        // Store the image in Anki
+        const storedFilename = await storeMediaFile(filename, base64Data);
+
+        // Update the card with the image
+        await updateNoteWithImage(lastNote.noteId, storedFilename);
+
+        showNotification('Screenshot added to Anki card', 'success');
+        console.log(`Updated Anki card ${lastNote.noteId} with screenshot`);
+
+      } catch (error) {
+        console.error('Error:', error);
+        showNotification('Failed: ' + error.message, 'error');
+      }
+    }
+
+    // The PSP's screen as it is now, from its exact (BMP) screenshot, made a
+    // lossless PNG. The PSP's frame has no window chrome, so nothing is cropped.
+    async function capturePspScreenshot() {
+      try {
+        const response = await fetch(`/screenshot.bmp?t=${Date.now()}`);
+        if (!response.ok) throw new Error(`the PSP answered ${response.status}`);
+
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close();
+
+        // Lossless PNG
+        return canvas.toDataURL('image/png');
+
+      } catch (error) {
+        throw new Error('Screenshot capture failed: ' + error.message);
+      }
+    }
+
+    async function getLastAnkiCard() {
+      const noteIds = await ankiInvoke('findNotes', { query: 'added:1' });
+
+      if (!noteIds || noteIds.length === 0) {
+        return null;
+      }
+
+      const lastNoteId = noteIds[noteIds.length - 1];
+      const notesInfo = await ankiInvoke('notesInfo', { notes: [lastNoteId] });
+
+      return notesInfo[0];
+    }
+
+    async function storeMediaFile(filename, base64Data) {
+      return await ankiInvoke('storeMediaFile', {
+        filename: filename,
+        data: base64Data
+      });
+    }
+
+    async function updateNoteWithImage(noteId, filename) {
+      const imageHtml = `<img src="${filename}">`;
+
+      await ankiInvoke('updateNoteFields', {
+        note: {
+          id: noteId,
+          fields: {
+            [settings.ankiField]: imageHtml
+          }
+        }
+      });
+    }
+
+    // A text body (no Content-Type header) keeps it a "simple" request: no
+    // CORS preflight. AnkiConnect still checks the page's origin against its
+    // webCorsOriginList.
+    async function ankiInvoke(action, params = {}) {
+      const payload = JSON.stringify({
+        action: action,
+        version: 6,
+        params: params
+      });
+
+      let response;
+      try {
+        response = await fetch(settings.ankiUrl, { method: 'POST', body: payload });
+      } catch (error) {
+        throw new Error('Failed to connect to Anki');
+      }
+
+      let result;
+      try {
+        result = await response.json();
+      } catch (e) {
+        throw new Error('Failed to parse Anki response');
+      }
+
+      if (result.error) throw new Error(result.error);
+      return result.result;
+    }
+
+    // A notification under the header, in the settings panel's style; the
+    // dot's color tells success from failure.
+    function showNotification(message, type = 'info') {
+      const notification = document.createElement('div');
+      notification.className = `toast ${type}`;
+      notification.setAttribute('role', 'status');
+      notification.textContent = message;
+      $('toasts').appendChild(notification);
+
+      setTimeout(() => {
+        notification.classList.add('out');
+        setTimeout(() => notification.remove(), 300);
+      }, 3000);
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    console.log('Anki Auto Screenshot Capture loaded. Monitoring for new cards...');
+  })();
+</script>
+</body>
+</html>
