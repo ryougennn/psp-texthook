@@ -130,7 +130,7 @@ $(BUILD)/%/exports.c: %/exports.exp
 
 $(BUILD)/thkcore_stubs.S: core/exports.exp
 	@mkdir -p $(BUILD)/stubs
-	cd $(BUILD)/stubs && $(EXPGEN) -s $(CURDIR)/$<
+	cd $(BUILD)/stubs && $(EXPGEN) -s "$(CURDIR)/$<"
 	mv $(BUILD)/stubs/thkcore.S $@
 
 $(BUILD)/thkcore_stubs.o: $(BUILD)/thkcore_stubs.S
