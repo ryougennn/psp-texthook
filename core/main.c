@@ -29,6 +29,7 @@
 #include <pspmodulemgr.h>
 #include <pspsysmem.h>
 #include <pspsysmem_kernel.h>
+#include <pspthreadman_kernel.h>
 #include <systemctrl.h>
 
 #include "core.h"
@@ -696,14 +697,16 @@ static int power_thread(SceSize args, void *argp)
  * the game's syscall, where k1 still marks the caller as user mode: file
  * calls would refuse klog's kernel buffers, so k1 is switched for the wait
  * and restored before the original call checks the game's arguments.
+ * The wait runs on a kernel stack of its own.
  */
+#define EXIT_STACK_SIZE 0x4000
 static int  (*orig_load_exec)(const char *file, void *param);
 static void (*orig_exit_game)(void);
 static void (*orig_exit_game_status)(int status);
 
-static void release_before_exit(const char *how)
+static void release_on_own_stack(void *arg)
 {
-    int k1 = pspSdkSetK1(0);
+    const char *how = arg;
 
     if (!manager_done) {
         if (vmem_held)
@@ -716,6 +719,13 @@ static void release_before_exit(const char *how)
     }
 
     klog("%s: passing the call on", how);
+}
+
+static void release_before_exit(const char *how)
+{
+    int k1 = pspSdkSetK1(0);
+
+    sceKernelExtendKernelStack(EXIT_STACK_SIZE, release_on_own_stack, (void *)how);
     pspSdkSetK1(k1);
 }
 
