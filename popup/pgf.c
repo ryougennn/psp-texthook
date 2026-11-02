@@ -9,8 +9,8 @@
  * then the glyphs, each a bit-packed header and nibble RLE pixels.
  *
  * The tables (146 KB for jpn0) and a cache of decoded glyphs share one
- * block in the volatile memory, held only while the popup is open; glyphs
- * are read from flash0 as they are first drawn.
+ * block from the core, held only while the popup is open; glyphs are read
+ * from flash0 as they are first drawn.
  *
  * Popup thread only.
  */
@@ -122,14 +122,15 @@ int th_pgf_open(const char *path)
     u32 slot_size  = (max_w * max_h + 3) & ~3u;
     u32 size       = table_size + CACHE_SLOTS * (sizeof(th_glyph) + slot_size);
 
-    block = sceKernelAllocPartitionMemory(TH_PARTITION, "thk_font", PSP_SMEM_High, size, NULL);
+    u8 *base;
+
+    block = thkPopupAlloc(size, (void **)&base);
     if (block < 0) {
         th_log("font: no memory for %lu bytes (%08x)", size, block);
         th_pgf_close();
         return -1;
     }
 
-    u8 *base = sceKernelGetBlockHeadAddr(block);
     int n;
 
     if (sceIoLseek32(fd, 0, PSP_SEEK_SET) != 0 ||
@@ -153,7 +154,7 @@ int th_pgf_open(const char *path)
 void th_pgf_close(void)
 {
     if (block >= 0)
-        sceKernelFreePartitionMemory(block);
+        thkPopupFree(block);
     if (fd >= 0)
         sceIoClose(fd);
     block = -1;

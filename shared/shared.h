@@ -46,6 +46,10 @@ int th_put_utf8(char *out, u32 cp);                 /* writes 1-4 bytes, returns
 u32 th_next_utf8(const char **s);                   /* decodes one code point, 0 at the end */
 void th_text_free(void);    /* the module is stopping */
 
+/* The Shift-JIS table's memory; a module can replace both (popup.c). */
+int  th_table_alloc(u32 size, void **addr);
+void th_table_free(int id);
+
 /* --- log.c --------------------------------------------------------------- */
 
 extern const char th_log_name[];       /* "user", "popup": each module's own */

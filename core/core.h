@@ -24,14 +24,18 @@ static inline u32 mips_jump(u32 opcode, u32 target)
 
 /* --- user pointers ------------------------------------------------------- */
 
+/* The extra RAM open to the popup (main.c), or 0, 0. */
+extern volatile u32 xmem_lo, xmem_hi;
+
 /*
  * True if [addr, addr + len) lies in user RAM, where a caller's buffers
  * must be: an export checks every pointer it is given before using it.
  */
 static inline int user_range(u32 addr, u32 len)
 {
-    return addr >= THK_USER_RAM_START && addr < THK_USER_RAM_END &&
-           len <= THK_USER_RAM_END - addr;
+    if (addr >= THK_USER_RAM_START && addr < THK_USER_RAM_END)
+        return len <= THK_USER_RAM_END - addr;
+    return addr >= xmem_lo && addr < xmem_hi && len <= xmem_hi - addr;
 }
 
 /* --- main.c -------------------------------------------------------------- */

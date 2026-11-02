@@ -12,8 +12,8 @@
  * The line comes from the core, which captures the text: the newest one
  * the game's filters leave something of.
  *
- * Everything it needs is allocated from the volatile memory when it opens
- * and freed when it closes: three 272 KB frames (the darkened game frame
+ * Everything it needs is allocated from the core when it
+ * opens and freed when it closes: three 272 KB frames (the darkened game frame
  * and two to draw into, alternately), the font's tables and glyph cache
  * (about 250 KB) and each dictionary's key filter (up to 256 KB).
  */
@@ -53,21 +53,33 @@ static SceUID block = -1;
 static u16    *bg, *frames[2];
 static int    back;             /* the frame to draw into next */
 
+/* The Shift-JIS table (text.c) goes with the other buffers. */
+int th_table_alloc(u32 size, void **addr)
+{
+    return thkPopupAlloc(size, addr);
+}
+
+void th_table_free(int id)
+{
+    thkPopupFree(id);
+}
+
 static int alloc_frames(void)
 {
-    block = sceKernelAllocPartitionMemory(TH_PARTITION, "thk_popup", PSP_SMEM_High,
-                                          3 * THK_POPUP_FB_SIZE + 64, NULL);
+    void *mem;
+
+    block = thkPopupAlloc(3 * THK_POPUP_FB_SIZE + 64, &mem);
     if (block < 0) {
         u32 mem[2] = { 0, 0 };
 
-        thkMemInfo(TH_PARTITION, mem);
+        thkMemInfo(thkPopupPartition(), mem);
         th_log("popup: no memory for the frames (%08x); %lu KB free, largest %lu KB",
                block, mem[0] / 1024, mem[1] / 1024);
         return 0;
     }
 
     /* the display wants its frames 64-byte aligned */
-    u32 base = ((u32)sceKernelGetBlockHeadAddr(block) + 63) & ~63u;
+    u32 base = ((u32)mem + 63) & ~63u;
 
     frames[0] = (u16 *)base;
     frames[1] = (u16 *)(base + THK_POPUP_FB_SIZE);
@@ -79,7 +91,7 @@ static int alloc_frames(void)
 static void free_frames(void)
 {
     if (block >= 0)
-        sceKernelFreePartitionMemory(block);
+        thkPopupFree(block);
     block = -1;
 }
 
@@ -338,7 +350,7 @@ static void run(void)
     }
     u32 mem[2] = { 0, 0 };
 
-    thkMemInfo(TH_PARTITION, mem);
+    thkMemInfo(thkPopupPartition(), mem);
     th_log("popup: %d characters, %d words, open in %lu ms; %lu KB free (largest %lu KB)",
            pop.n, pop.ntok, (sceKernelGetSystemTimeLow() - t0) / 1000, mem[0] / 1024,
            mem[1] / 1024);
@@ -386,7 +398,7 @@ int module_start(SceSize args, void *argp)
 
     memset(&opt, 0, sizeof(opt));
     opt.size      = sizeof(opt);
-    opt.stackMpid = TH_PARTITION;
+    opt.stackMpid = thkPopupPartition();
 
     thread_id = sceKernelCreateThread("thkpopup", popup_thread, POPUP_PRIORITY,
                                       POPUP_STACK, 0, &opt);

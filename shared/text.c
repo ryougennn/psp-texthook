@@ -107,6 +107,21 @@ static SceUID    sjis_block;
 static const u16 *sjis_table;
 static int       sjis_state;    /* 0 = not tried, 1 = loaded, -1 = unavailable */
 
+/* The table's memory, in the module's partition; the popup has its own. */
+__attribute__((weak)) int th_table_alloc(u32 size, void **addr)
+{
+    SceUID b = sceKernelAllocPartitionMemory(TH_PARTITION, "thk_sjis", PSP_SMEM_High, size, NULL);
+
+    if (b >= 0)
+        *addr = sceKernelGetBlockHeadAddr(b);
+    return b;
+}
+
+__attribute__((weak)) void th_table_free(int id)
+{
+    sceKernelFreePartitionMemory(id);
+}
+
 static int sjis_load(void)
 {
     if (sjis_state)
@@ -118,21 +133,20 @@ static int sjis_load(void)
         th_log("sjis: %s missing (%08x); Shift-JIS text will show as hex", SJIS_TABLE_PATH, fd);
         return 0;
     }
-    SceUID block = sceKernelAllocPartitionMemory(TH_PARTITION, "thk_sjis",
-                                                 PSP_SMEM_High, SJIS_TABLE_SIZE, NULL);
+    void   *table;
+    SceUID block = th_table_alloc(SJIS_TABLE_SIZE, &table);
     if (block < 0) {
         th_log("sjis: no memory for the table (%08x)", block);
         sceIoClose(fd);
         return 0;
     }
 
-    void *table = sceKernelGetBlockHeadAddr(block);
-    int   n     = sceIoRead(fd, table, SJIS_TABLE_SIZE);
+    int n = sceIoRead(fd, table, SJIS_TABLE_SIZE);
 
     sceIoClose(fd);
     if (n != SJIS_TABLE_SIZE) {
         th_log("sjis: table is %d bytes, expected %d", n, SJIS_TABLE_SIZE);
-        sceKernelFreePartitionMemory(block);
+        th_table_free(block);
         return 0;
     }
 
@@ -150,7 +164,7 @@ static int sjis_load(void)
 void th_text_free(void)
 {
     if (sjis_state > 0)
-        sceKernelFreePartitionMemory(sjis_block);
+        th_table_free(sjis_block);
     sjis_table = NULL;
     sjis_state = 0;
 }
