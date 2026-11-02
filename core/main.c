@@ -368,7 +368,9 @@ int thkMemInfo(int partition, u32 *out)
  *
  *   - texthook.prx (the network) while the Wi-Fi switch is on. A switch
  *     already on when the game boots is ignored until it's flipped off and
- *     on, so the memory is never taken while the game is still loading;
+ *     on, so the memory is never taken while the game is still loading, and
+ *     it's stopped while the system needs the memory (see the dialogs
+ *     section);
  *   - thkpopup.prx (the dictionary) while L+R's popup is open. If the
  *     system has the memory (a save screen), the popup says so instead.
  *
@@ -381,11 +383,15 @@ int thkMemInfo(int partition, u32 *out)
  * stopped for good.
  */
 enum { M_BOOT, M_WAIT_FLIP, M_OFF, M_RUNNING, M_SLEEP };
-enum { REQ_NONE, REQ_SLEEP, REQ_QUIT };
+enum { REQ_NONE, REQ_SLEEP, REQ_QUIT, REQ_DIALOG };
 
 #define GAME_SETTLE     (2 * 1000 * 1000)   /* after the game's module starts */
 #define WAKE_SETTLE     (3 * 1000 * 1000)
 #define START_RETRY     (5 * 1000 * 1000)
+#define DIALOG_GRACE    (3 * 1000 * 1000)
+
+/* When the game last opened a system dialog. */
+static volatile u32 dialog_at;
 #define EXIT_WAIT_MS    3000
 
 #define NID_sceKernelLoadExec           0xBD2F1094
@@ -430,15 +436,29 @@ static void vmem_drop(const char *why)
     klog("%s: volatile memory released (%08x)", why, r);
 }
 
-/* Loads and starts a user module in the volatile memory. */
-static SceUID load_module(const char *path)
+/* Smaller start/stop stacks outside the volatile memory. */
+static SceKernelSMOption *small_stack(SceKernelSMOption *sm, int partition)
+{
+    if (partition == 5)
+        return NULL;
+
+    memset(sm, 0, sizeof(*sm));
+    sm->size      = sizeof(*sm);
+    sm->mpidstack = partition;
+    sm->stacksize = 0x4000;
+    sm->priority  = 0x20;
+    return sm;
+}
+
+/* Loads and starts a user module in `partition`. */
+static SceUID load_module(const char *path, int partition)
 {
     SceKernelLMOption opt;
 
     memset(&opt, 0, sizeof(opt));
     opt.size     = sizeof(opt);
-    opt.mpidtext = 5;
-    opt.mpiddata = 5;
+    opt.mpidtext = partition;
+    opt.mpiddata = partition;
     opt.position = PSP_SMEM_Low;
     opt.access   = 1;
 
@@ -448,8 +468,9 @@ static SceUID load_module(const char *path)
         return id;
     }
 
+    SceKernelSMOption sm;
     int status;
-    int r = sceKernelStartModule(id, 0, NULL, &status, NULL);
+    int r = sceKernelStartModule(id, 0, NULL, &status, small_stack(&sm, partition));
     if (r < 0) {
         klog("starting %s failed (%08x)", path, r);
         sceKernelUnloadModule(id);
@@ -458,10 +479,11 @@ static SceUID load_module(const char *path)
     return id;
 }
 
-static void unload_module(SceUID id, const char *name)
+static void unload_module(SceUID id, const char *name, int partition)
 {
+    SceKernelSMOption sm;
     int status;
-    int r = sceKernelStopModule(id, 0, NULL, &status, NULL);
+    int r = sceKernelStopModule(id, 0, NULL, &status, small_stack(&sm, partition));
     int u = sceKernelUnloadModule(id);
 
     if (r < 0 || u < 0)
@@ -472,14 +494,18 @@ static void unload_module(SceUID id, const char *name)
 
 static int start_texthook(void)
 {
+    static int waiting;     /* logged once per wait */
     int r = vmem_take();
 
     if (r < 0) {
-        klog("volatile memory is in use (%08x); retrying in 5 s", r);
+        if (!waiting)
+            klog("volatile memory is in use (%08x); retrying every 5 s", r);
+        waiting = 1;
         return r;
     }
+    waiting = 0;
 
-    SceUID id = load_module(USER_MODULE_PATH);
+    SceUID id = load_module(USER_MODULE_PATH, 5);
     if (id < 0) {
         vmem_drop("texthook.prx didn't start");
         return id;
@@ -488,8 +514,26 @@ static int start_texthook(void)
     return 0;
 }
 
+/* texthook.prx's next event, saved as it stopped (thkEventSaveNext). */
+static u32 saved_next;
+static int resume_after_dialog;
+
+void thkEventSaveNext(u32 seq)
+{
+    saved_next = seq;
+}
+
+u32 thkEventResumeNext(void)
+{
+    u32 seq = resume_after_dialog ? saved_next : 0;
+
+    resume_after_dialog = 0;
+    return seq;
+}
+
 static void stop_texthook(const char *why)
 {
+    resume_after_dialog = 0;
     if (texthook_id <= 0)
         return;
     klog("%s: stopping texthook.prx", why);
@@ -501,11 +545,140 @@ static void stop_texthook(const char *why)
     if (net_busy)
         klog("%s: network modules still loading after 5 s; stopping anyway", why);
 
-    unload_module(texthook_id, "texthook.prx");
+    unload_module(texthook_id, "texthook.prx", 5);
     net_unload();   /* texthook.prx can't: it's stopped from inside the module manager */
     net_stopping = 0;
     texthook_id  = 0;
     vmem_drop(why);
+}
+
+/* --- the popup's buffers ------------------------------------------------- */
+
+/*
+ * The popup's buffers come from the core (thkPopupAlloc): the volatile
+ * memory, or, in games that keep it, the extra RAM of the PSP-2000 and
+ * later, with the popup itself in the game's memory.
+ */
+#define XMEM_PARTITION      9
+#define XMEM_SIZE           (3 << 20)
+#define XMEM_CODE_ROOM      (112 * 1024)    /* the popup, and room left for the game */
+#define POPUP_BLOCKS        8
+
+static SceUID popup_blocks[POPUP_BLOCKS];   /* in the volatile memory */
+static SceUID xmem_block = -1;
+static u32    xmem_used;
+static int    popup_partition = 5;          /* where thkpopup.prx and its stack go */
+volatile u32  xmem_lo, xmem_hi;
+
+static int xmem_open(void)
+{
+    if (sceKernelGetModel() == 0)
+        return -1;      /* the PSP-1000 has no extra RAM */
+
+    u32 room = sceKernelPartitionMaxFreeMemSize(PSP_MEMORY_PARTITION_USER);
+    if (room < XMEM_CODE_ROOM) {
+        klog("popup: only %lu KB left in the game's memory", room / 1024);
+        return -1;
+    }
+
+    SceUID b = sceKernelAllocPartitionMemory(XMEM_PARTITION, "thk_xmem", PSP_SMEM_High,
+                                             XMEM_SIZE + 64, NULL);
+    if (b < 0) {
+        klog("popup: no extra RAM (%08x)", b);
+        return b;
+    }
+
+    u32 lo = ((u32)sceKernelGetBlockHeadAddr(b) + 63) & ~63u;
+
+    xmem_block = b;
+    xmem_used  = 0;
+    xmem_lo    = lo;
+    xmem_hi    = lo + XMEM_SIZE;
+    popup_partition = PSP_MEMORY_PARTITION_USER;
+    klog("popup: buffers in the extra RAM, %08lx-%08lx; code in the game's memory (%lu KB free)",
+         lo, lo + XMEM_SIZE, room / 1024);
+    return 0;
+}
+
+static void xmem_close(void)
+{
+    if (xmem_block < 0)
+        return;
+
+    xmem_lo = xmem_hi = 0;
+    sceKernelFreePartitionMemory(xmem_block);
+    xmem_block = -1;
+    popup_partition = 5;
+}
+
+int thkPopupAlloc(u32 size, void **addr)
+{
+    int k1  = pspSdkSetK1(0);
+    int ret = THK_ERR_ARGS;
+
+    if (!user_range((u32)addr, sizeof(*addr)) || ((u32)addr & 3) || !size) {
+        /* refused */
+    } else if (xmem_block >= 0) {
+        /* used up in order; freed when the popup closes */
+        size = (size + 63) & ~63u;
+        if (size > XMEM_SIZE - xmem_used) {
+            klog("popup: extra RAM full (%lu + %lu KB)", xmem_used / 1024, size / 1024);
+            ret = SCE_KERNEL_ERROR_NO_MEMORY;
+        } else {
+            *addr      = (void *)(xmem_lo + xmem_used);
+            xmem_used += size;
+            ret        = 1;
+        }
+    } else {
+        int i = 0;
+
+        while (i < POPUP_BLOCKS && popup_blocks[i] > 0)
+            i++;
+        if (i == POPUP_BLOCKS) {
+            ret = SCE_KERNEL_ERROR_NO_MEMORY;
+        } else {
+            SceUID b = sceKernelAllocPartitionMemory(5, "thk_popup", PSP_SMEM_High, size, NULL);
+
+            if (b >= 0) {
+                popup_blocks[i] = b;
+                *addr = sceKernelGetBlockHeadAddr(b);
+            }
+            ret = b;
+        }
+    }
+
+    pspSdkSetK1(k1);
+    return ret;
+}
+
+int thkPopupPartition(void)
+{
+    return popup_partition;
+}
+
+int thkPopupFree(int id)
+{
+    int k1 = pspSdkSetK1(0);
+
+    for (int i = 0; id > 0 && i < POPUP_BLOCKS; i++)
+        if (popup_blocks[i] == id) {
+            sceKernelFreePartitionMemory(id);
+            popup_blocks[i] = 0;
+        }
+
+    pspSdkSetK1(k1);
+    return 0;
+}
+
+/* After the popup is unloaded: what it left, and the extra RAM. */
+static void popup_free_all(void)
+{
+    for (int i = 0; i < POPUP_BLOCKS; i++)
+        if (popup_blocks[i] > 0) {
+            sceKernelFreePartitionMemory(popup_blocks[i]);
+            popup_blocks[i] = 0;
+        }
+    xmem_close();
 }
 
 /* --- thkpopup.prx: the dictionary ---------------------------------------- */
@@ -518,17 +691,18 @@ static void start_popup(int state)
     }
 
     int r = vmem_take();
-    if (r < 0) {
+    if (r < 0 && xmem_open() < 0) {
         klog("popup: the system is using the volatile memory (%08x)", r);
         overlay_message("Dictionary: not now (the system is busy)", 3000);
         popup_reset();
         return;
     }
 
-    SceUID id = load_module(POPUP_MODULE_PATH);
+    SceUID id = load_module(POPUP_MODULE_PATH, popup_partition);
     if (id < 0) {
         overlay_message("Dictionary: thkpopup.prx didn't load", 3000);
         popup_reset();
+        popup_free_all();
         vmem_drop("popup didn't start");
         return;
     }
@@ -542,11 +716,42 @@ static void stop_popup(const char *why)
         return;
 
     klog("%s: unloading thkpopup.prx", why);
-    unload_module(popup_id, "thkpopup.prx");   /* its module_stop waits for its thread */
+    unload_module(popup_id, "thkpopup.prx", popup_partition);  /* module_stop waits for its thread */
     popup_id = 0;
     popup_reset();
+    popup_free_all();
     klog("%s: thkpopup.prx unloaded", why);
     vmem_drop(why);
+}
+
+/* Threads waiting for the volatile memory. */
+static int vmem_waiters(void)
+{
+    static SceUID sema = -1;
+    SceKernelSemaInfo info;
+
+    if (sema < 0) {
+        static SceUID ids[128];
+        int n = 0;
+
+        if (sceKernelGetThreadmanIdList(SCE_KERNEL_TMID_Semaphore, ids, 128, &n) < 0)
+            return 0;
+        for (int i = 0; i < n && i < 128 && sema < 0; i++) {
+            memset(&info, 0, sizeof(info));
+            info.size = sizeof(info);
+            if (sceKernelReferSemaStatus(ids[i], &info) >= 0 && !strcmp(info.name, "ScePowerVmem"))
+                sema = ids[i];
+        }
+        if (sema < 0)
+            return 0;
+    }
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (sceKernelReferSemaStatus(sema, &info) < 0) {
+        sema = -1;
+        return 0;
+    }
+    return info.numWaitThreads;
 }
 
 static int manager(SceSize args, void *argp)
@@ -561,6 +766,22 @@ static int manager(SceSize args, void *argp)
 
         /* Sleep and quit come first, whatever the state. */
         int req = release_req;
+        if (!req && texthook_id > 0 && vmem_waiters() > 0) {
+            klog("a system task is waiting for the volatile memory");
+            dialog_at = now | 1;
+            req = REQ_DIALOG;
+        }
+        if (req == REQ_DIALOG) {
+            release_req = REQ_NONE;
+            stop_texthook("the system needs the volatile memory");
+            resume_after_dialog = 1;
+            if (state == M_RUNNING) {
+                overlay_message("Wi-Fi: paused for a system screen", 3000);
+                state    = M_OFF;
+                retry_at = now | 1;     /* back when the dialog has let go */
+            }
+            continue;
+        }
         if (req) {
             release_req = REQ_NONE;
             stop_popup(req == REQ_QUIT ? "quitting" : "going to sleep");
@@ -615,7 +836,10 @@ static int manager(SceSize args, void *argp)
             break;
 
         case M_OFF:
-            if (sw && (!retry_at || (u32)(now - retry_at) > START_RETRY)) {
+            if (!sw)
+                resume_after_dialog = 0;    /* switched off meanwhile: start fresh */
+            if (sw && (!retry_at || (u32)(now - retry_at) > START_RETRY) &&
+                (!dialog_at || (u32)(now - dialog_at) > DIALOG_GRACE) && !vmem_waiters()) {
                 if (!retry_at)
                     klog("Wi-Fi switch turned on");
                 retry_at = 0;
@@ -789,6 +1013,100 @@ static void hook_exit_calls(void)
     sctrlFlushCache();
 }
 
+/* --- dialogs ------------------------------------------------------------- */
+
+/*
+ * The system's dialogs need the volatile memory, so the core stops
+ * texthook.prx when the game starts one; the manager starts it again
+ * afterwards.
+ */
+#define NID_sceUtilitySavedataInitStart     0x50C4CD57
+#define NID_sceUtilityMsgDialogInitStart    0x2AD8E239
+#define NID_sceUtilityOskInitStart          0xF6269B82
+#define NID_sceUtilityNetconfInitStart      0x4DB1E739
+#define NID_sceUtilityGameSharingInitStart  0xC492F751
+#define NID_sceUtilityScreenshotInitStart   0x0251B134
+#define NID_sceUtilityHtmlViewerInitStart   0xCDC3AA41
+#define NID_sceUtilityInstallInitStart      0x1281DA8E
+#define NID_sceUtilityGamedataInstallInitStart 0x32E32DCB
+#define DIALOG_WAIT_MS  6000
+
+static void dialog_on_own_stack(void *arg)
+{
+    if (manager_done || texthook_id <= 0 || release_req)
+        return;
+    klog("%s: the game wants the volatile memory", (const char *)arg);
+    release_req = REQ_DIALOG;
+    for (int ms = 0; texthook_id > 0 && ms < DIALOG_WAIT_MS; ms += 20)
+        sceKernelDelayThread(20 * 1000);
+    if (texthook_id > 0)
+        klog("%s: texthook.prx still loaded after %d ms; continuing anyway",
+             (const char *)arg, DIALOG_WAIT_MS);
+}
+
+static void release_before_dialog(const char *name)
+{
+    int k1 = pspSdkSetK1(0);
+
+    dialog_at = sceKernelGetSystemTimeLow() | 1;
+    if (texthook_id > 0)
+        sceKernelExtendKernelStack(EXIT_STACK_SIZE, dialog_on_own_stack, (void *)name);
+    pspSdkSetK1(k1);
+}
+
+#define DIALOG_HOOK(fn)                                         \
+    static int (*orig_##fn)(void *params);                      \
+    static int fn##_hook(void *params)                          \
+    {                                                           \
+        release_before_dialog(#fn);                             \
+        return orig_##fn(params);                               \
+    }
+
+DIALOG_HOOK(sceUtilitySavedataInitStart)
+DIALOG_HOOK(sceUtilityMsgDialogInitStart)
+DIALOG_HOOK(sceUtilityOskInitStart)
+DIALOG_HOOK(sceUtilityNetconfInitStart)
+DIALOG_HOOK(sceUtilityGameSharingInitStart)
+DIALOG_HOOK(sceUtilityScreenshotInitStart)
+DIALOG_HOOK(sceUtilityHtmlViewerInitStart)
+DIALOG_HOOK(sceUtilityInstallInitStart)
+DIALOG_HOOK(sceUtilityGamedataInstallInitStart)
+
+#define DIALOG(fn) { NID_##fn, (void **)&orig_##fn, fn##_hook, #fn }
+
+static void hook_dialog_calls(void)
+{
+    static const struct {
+        u32         nid;
+        void        **orig;
+        void        *hook;
+        const char  *name;
+    } calls[] = {
+        DIALOG(sceUtilitySavedataInitStart),
+        DIALOG(sceUtilityMsgDialogInitStart),
+        DIALOG(sceUtilityOskInitStart),
+        DIALOG(sceUtilityNetconfInitStart),
+        DIALOG(sceUtilityGameSharingInitStart),
+        DIALOG(sceUtilityScreenshotInitStart),
+        DIALOG(sceUtilityHtmlViewerInitStart),
+        DIALOG(sceUtilityInstallInitStart),
+        DIALOG(sceUtilityGamedataInstallInitStart),
+    };
+
+    for (unsigned i = 0; i < sizeof(calls) / sizeof(calls[0]); i++) {
+        u32 f = sctrlHENFindFunction("sceUtility_Driver", "sceUtility", calls[i].nid);
+
+        if (!f) {
+            klog("%s not found; with Wi-Fi on, its dialog will wait", calls[i].name);
+            continue;
+        }
+        *calls[i].orig = (void *)f;
+        sctrlHENPatchSyscall((void *)f, calls[i].hook);
+    }
+
+    sctrlFlushCache();
+}
+
 /* --- module start -------------------------------------------------------- */
 
 static void start_thread(const char *name, SceKernelThreadEntry fn, int prio)
@@ -814,6 +1132,7 @@ int module_start(SceSize args, void *argp)
     overlay_init();
     popup_init();
     hook_exit_calls();
+    hook_dialog_calls();
     start_thread("thkcore_manager", manager, 0x20);
     start_thread("thkcore_power", power_thread, 0x11);
     return 0;

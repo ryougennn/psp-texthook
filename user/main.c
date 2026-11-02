@@ -86,8 +86,19 @@ static void process_events(void)
     if (thkEventRange(range) < 0)
         return;
     if (!started) {
-        next_seq = range[1] + 1;
+        u32 resume = thkEventResumeNext();
+
+        next_seq = resume ? resume : range[1] + 1;
         started  = 1;
+
+        /* Resuming: restore the repeat check from the lines already sent. */
+        for (u32 seq = resume > 32 ? resume - 32 : 1; resume && seq < resume; seq++) {
+            int hook;
+            int n = th_event_line(seq, line, sizeof(line), &hook);
+
+            if (n > 0 && hook < REPEAT_HOOKS)
+                last_hash[hook] = th_hash(line, n);
+        }
     }
     if (range[1] && next_seq < range[0]) {
         events_missed += range[0] - next_seq;
@@ -166,6 +177,8 @@ static int worker(SceSize args, void *argp)
     }
 
     th_log("stopping");
+    if (g)
+        thkEventSaveNext(next_seq);
     th_net_stop(0);             /* the core unloads the network modules */
     th_text_free();
     return 0;                   /* module_stop deletes the thread */

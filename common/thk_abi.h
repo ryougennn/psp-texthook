@@ -9,7 +9,7 @@
 
 #include <psptypes.h>
 
-#define THK_API_VERSION     10
+#define THK_API_VERSION     11
 
 /*
  * User-accessible RAM: the volatile memory (partition 5, 0x08400000, where
@@ -58,6 +58,10 @@ int thkEventRange(u32 *out);
  * Returns the bytes copied, or THK_ERR_GONE.
  */
 int thkEventGet(u32 seq, thk_event *out, int size);
+
+/* texthook.prx's next event across a stop for a system dialog (0: none). */
+void thkEventSaveNext(u32 seq);
+u32  thkEventResumeNext(void);
 
 /*
  * Final state of hook `addr` (THK_OK, THK_PENDING or THK_ERR_*), or
@@ -125,6 +129,13 @@ int thkPopupShow(void *fb);
  * (PSP_DISPLAY_PIXEL_FORMAT_*). THK_ERR_ARGS if there is none yet.
  */
 int thkPopupFrame(u32 *out);
+
+/* The popup's buffers: a block ID (> 0) and its address, or < 0. */
+int thkPopupAlloc(u32 size, void **addr);
+int thkPopupFree(int id);
+
+/* Where the popup was loaded: 5 (the volatile memory) or 2 (the game's). */
+int thkPopupPartition(void);
 
 /* --- network modules and memory ------------------------------------------ */
 

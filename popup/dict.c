@@ -86,7 +86,7 @@ static int read_at(dict *d, u32 off, void *buf, int len)
 static void close_one(dict *d)
 {
     if (d->filter_block >= 0)
-        sceKernelFreePartitionMemory(d->filter_block);
+        thkPopupFree(d->filter_block);
     if (d->fd >= 0)
         sceIoClose(d->fd);
     d->filter_block = -1;
@@ -127,14 +127,12 @@ static int open_one(dict *d, const char *name)
 
     u32 size = 1u << (h->filter_log2 - 3);
 
-    d->filter_block = sceKernelAllocPartitionMemory(TH_PARTITION, "thk_dict", PSP_SMEM_High,
-                                                    size, NULL);
+    d->filter_block = thkPopupAlloc(size, (void **)&d->filter);
     if (d->filter_block < 0) {
         th_log("dict: no memory for the key filter of %s (%08x)", name, d->filter_block);
         close_one(d);
         return -1;
     }
-    d->filter = sceKernelGetBlockHeadAddr(d->filter_block);
 
     int n = read_at(d, h->off_filter, (void *)d->filter, size);
     if (n != (int)size) {

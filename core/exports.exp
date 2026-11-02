@@ -19,6 +19,11 @@ PSP_EXPORT_FUNC(thkPopupShow)
 PSP_EXPORT_FUNC(thkPopupFrame)
 PSP_EXPORT_FUNC(thkEventRange)
 PSP_EXPORT_FUNC(thkEventGet)
+PSP_EXPORT_FUNC(thkEventSaveNext)
+PSP_EXPORT_FUNC(thkEventResumeNext)
+PSP_EXPORT_FUNC(thkPopupAlloc)
+PSP_EXPORT_FUNC(thkPopupFree)
+PSP_EXPORT_FUNC(thkPopupPartition)
 # Not imported by anything: the hook stubs (capture.c) make its syscall.
 PSP_EXPORT_FUNC(thkHookEntry)
 PSP_EXPORT_END
